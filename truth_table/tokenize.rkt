@@ -1,12 +1,14 @@
 #lang typed/racket/base
 
 ;; TODO: figure out how to test (not failing on failure)
+;; I can't seem to handle values well..
 
 (provide tokenize
          (struct-out token)
          TokenType)
 
-(require racket/match)
+(require racket/match
+         racket/list)
 
 (module+ test
   (require typed/rackunit
@@ -16,47 +18,38 @@
 ;; parsing variable names
 ;; - - - - - - - - - - - - -
 
-;; return value type
-(struct consume-result ([val : (Listof Char)]  ; variable name
-                        [rst : (Listof Char)]) ; rest of formula
-  #:transparent)
-
 ;; formula -> (latter variable name), (rest of formula)
-(: consume-alphabet-or-number (-> (Listof Char) consume-result))
+(: consume-alphabet-or-number (-> (Listof Char)
+                                  (List (Listof Char) (Listof Char))))
 (define (consume-alphabet-or-number li)
-  (match li
-    [(list) (consume-result (list) li)] ; end of input
-    [(list head tail ...)
-     (cond
-       [(or (char<=? #\a head #\z)
-            (char<=? #\A head #\Z)
-            (char<=? #\0 head #\9))
-        (match (consume-alphabet-or-number tail)
-          [(consume-result val rst)
-           (consume-result (cons head val) rst)])]
-       [else                            ; end of name
-        (consume-result (list) li)])]))
+  (define-values (left right)
+    (splitf-at li
+               (lambda ([c : Char])
+                 (or (char<=? #\a c #\z)
+                     (char<=? #\A c #\Z)
+                     (char<=? #\0 c #\9)))))
+  (list left right))
 
 ;; formula -> (variable name), (rest of formula)
-(: consume-variable (-> (Listof Char) consume-result))
-(define (consume-variable s)
-  (match s
-    [(list) (error 'consume-variable
-                   "expected a variable name, read an empty formula")]
-    [(list head tail ...)
-     (cond
-       [(or (char<=? #\a head #\z)
-            (char<=? #\A head #\Z))
-        (match (consume-alphabet-or-number tail)
-          [(consume-result val rst)
-           (consume-result (cons head val) rst)])]
-       [else (error 'consume-variable
-                    "variable name should start with alphabet, read '~c'"
-                    head)])]))
+(: consume-variable (-> (Listof Char)
+                        (List (Listof Char) (Listof Char))))
+(define/match (consume-variable s)
+  [((list)) (error 'consume-variable
+                 "expected a variable name, read an empty formula")]
+  [((list head tail ...))
+   (cond
+     [(or (char<=? #\a head #\z)
+          (char<=? #\A head #\Z))
+      (match-define (list val rst)
+        (consume-alphabet-or-number tail))
+      (list (cons head val) rst)]
+     [else (error 'consume-variable
+                  "variable name should start with alphabet, read '~c'"
+                  head)])])
 
 (module+ test
   (define sl string->list)
-  (define ret consume-result)
+  (define ret list)
   
   (define consume-variable-tests
     (test-suite
@@ -107,34 +100,36 @@
                           'variable
                           'one
                           'zero))
+
 (struct token ([type : TokenType]
                [str  : String])
   #:transparent)
 
 ;; no #\space in input char list
 (: list-to-token (-> (Listof Char) (Listof token)))
-(define (list-to-token li)
-  (match li
-    [(list) (list)]
-    [(list head tail ...)
-     (case head
-       [(#\+) (cons (token 'or      "+") (list-to-token tail))]
-       [(#\*) (cons (token 'and     "*") (list-to-token tail))]
-       [(#\^) (cons (token 'xor     "^") (list-to-token tail))]
-       [(#\!) (cons (token 'not     "!") (list-to-token tail))]
-       [(#\() (cons (token 'p-open  "(") (list-to-token tail))]
-       [(#\)) (cons (token 'p-close ")") (list-to-token tail))]
-       [(#\1) (cons (token 'one     "1") (list-to-token tail))]
-       [(#\0) (cons (token 'zero    "0") (list-to-token tail))]
-       [else (match (consume-variable li)
-               [(consume-result val rst)
-                (cons (token 'variable (list->string val))
-                      (list-to-token rst))])])]))
+(define/match (list-to-token li)
+  [((list)) '()]
+  [((list head tail ...))
+   (case head
+     [(#\+) (cons (token 'or      "+") (list-to-token tail))]
+     [(#\*) (cons (token 'and     "*") (list-to-token tail))]
+     [(#\^) (cons (token 'xor     "^") (list-to-token tail))]
+     [(#\!) (cons (token 'not     "!") (list-to-token tail))]
+     [(#\() (cons (token 'p-open  "(") (list-to-token tail))]
+     [(#\)) (cons (token 'p-close ")") (list-to-token tail))]
+     [(#\1) (cons (token 'one     "1") (list-to-token tail))]
+     [(#\0) (cons (token 'zero    "0") (list-to-token tail))]
+     [else
+      (match-define (list val rst)
+        (consume-variable li))
+      (cons (token 'variable (list->string val))
+            (list-to-token rst))])])
 
 ;; convert formula string into token list
 (: tokenize (-> String (Listof token)))
 (define (tokenize s)
-  (match (remove* (list #\space) (string->list s))
+  (define no-space (remove* '(#\space) (string->list s)))
+  (match no-space
     [(list) (error 'tokenize "expression should not be empty")]
     [(var a) (list-to-token a)]))
 

@@ -4,8 +4,9 @@
          tree-to-string
          (struct-out node))
 
-(require racket/match
-         (only-in "tokenize.rkt"
+(require racket/match)
+
+(require (only-in "tokenize.rkt"
                   token token? token-type TokenType))
 
 (module+ test
@@ -20,40 +21,38 @@
 ;; the left part is not reversed
 (: next-close (-> (Listof token)
                   (List (Listof token) (Listof token))))
-(define (next-close li)
-  (match li
-    [(list) (error 'next-close "expected matching closing parenthesis")]
-    [(list head tail ...)
-     (case (token-type head)
-       [(p-close)                       ; a match
-        (list (list head) tail)]
-       [(p-open)                        ; another opening parenthesis
-        (define-values (closed next)
-          (apply values (consume-parens li)))
-        (define-values (left right)
-          (apply values (next-close next)))
-        (list (append closed left) right)]
-       [else
-        (define-values (left right)
-          (apply values (next-close tail)))
-        (list (cons head left) right)])]))
+(define/match (next-close li)
+  [((list)) (error 'next-close "expected matching closing parenthesis")]
+  [((list head tail ...))
+   (case (token-type head)
+     [(p-close)                         ; a match
+      (list (list head) tail)]
+     [(p-open)                          ; another opening parenthesis
+      (match-define (list closed next)
+        (consume-parens li))
+      (match-define (list left right)
+        (next-close next))
+      (list (append closed left) right)]
+     [else
+      (match-define (list left right)
+        (next-close tail))
+      (list (cons head left) right)])])
 
 ;; splits at the end of the matching closing parenthesis
 ;; the left part is not reversed, starts with `(`
 (: consume-parens (-> (Listof token)
                       (List (Listof token) (Listof token))))
-(define (consume-parens li)
-  (match li
-    [(list) (error 'consume-parens "expected non empty list of tokens")]
-    [(list head tail ...)
-     (case (token-type head)
-       [(p-open)
-        (match (next-close tail)
-          [(list left right)
-           (list (cons head left) right)])]
-       [else (error 'consume-parens
-                    "expected starting with 'p-open', read '~a'"
-                    head)])]))
+(define/match (consume-parens li)
+  [((list)) (error 'consume-parens "expected non empty list of tokens")]
+  [((list head tail ...))
+   (case (token-type head)
+     [(p-open)
+      (match-define (list left right)
+        (next-close tail))
+      (list (cons head left) right)]
+     [else (error 'consume-parens
+                  "expected starting with 'p-open', read '~a'"
+                  head)])])
 
 (module+ test
   (require (only-in "tokenize.rkt" tokenize))
@@ -113,11 +112,13 @@
     [(list) #f]
     [(list head tail ...)
      (define head-type (token-type head))
-     (cond
-       [(equal? head-type 'p-open)      ; skip parentheses
-        (define-values (closed next)
-          (apply values (consume-parens li)))
-        (match ((split-token-right tt) next)
+     (case head-type
+       [(p-open)                        ; skip parentheses
+        (match-define (list closed next)
+          (consume-parens li))
+        (define next-match
+          ((split-token-right tt) next))
+        (match next-match
           [#f #f]
           [(list left tkn right)
            (list (append closed left) tkn right)])]
@@ -125,9 +126,11 @@
         (define this-match
           (cond
             [(equal? head-type tt)
-             (list (list) head tail)]
+             (list '() head tail)]
             [else #f]))
-        (match ((split-token-right tt) tail)
+        (define next-match
+          ((split-token-right tt) tail))
+        (match next-match
           [#f this-match]
           [(list left tkn right)
            (list (cons head left) tkn right)])])]))
@@ -189,62 +192,59 @@
      (node t (list (and-expr l) (not-expr r)))]))
 
 (: not-expr ExprFunc)
-(define (not-expr li)
-  (match li
-    [(list) (error 'not-expr "expected <NotExpr>, read empty list")]
-    [(list head tail ...)
-     (case (token-type head)
-       [(not) (node head (list (atom-expr tail)))]
-       [else (atom-expr li)])]))
+(define/match (not-expr li)
+  [((list)) (error 'not-expr "expected <NotExpr>, read empty list")]
+  [((list head tail ...))
+   (case (token-type head)
+     [(not) (node head (list (atom-expr tail)))]
+     [else (atom-expr li)])])
 
 (: atom-expr ExprFunc)
-(define (atom-expr li)
-  (match li
-    [(list) (error 'atom-expr "expected <Atomic>, read empty list")]
-    [(list head)
-     (define type (token-type head))
-     (case type
-       [(variable one zero) (node head '())]
-       [else (error 'atom-expr
-                    "expected <Variable> or <Constant>, read token '~a'"
-                    type)])]
-    [(list whole ...)                   ; formula
-     ;; wanted to match something like:
-     #;(list #{head : token} #{body : (Listof token)} ... #{tail : token})
-     (define-values (head body tail)
-       (apply values (head-body-tail whole)))
-     (define-values (head-type tail-type)
-       (values (token-type head) (token-type tail)))
-     (cond
-       [(and (equal? head-type 'p-open)
-             (equal? tail-type 'p-close))
-        (formula-expr body)]
-       [else (error 'atom-expr
-                    "expected (<Formula>), but first token was '~a' and last was '~a'"
-                    head-type
-                    tail-type)])]))
+(define/match (atom-expr li)
+  [((list)) (error 'atom-expr "expected <Atomic>, read empty list")]
+  [((list head))
+   (define type (token-type head))
+   (case type
+     [(variable one zero) (node head '())]
+     [else (error 'atom-expr
+                  "expected <Variable> or <Constant>, read token '~a'"
+                  type)])]
+  [((list whole ...))               ; formula
+   ;; wanted to match something like:
+   #;(list #{head : token} #{body : (Listof token)} ... #{tail : token})
+   (match-define (list head body tail)
+     (head-body-tail whole))
+   (define head-type (token-type head))
+   (define tail-type (token-type tail))
+   (cond
+     [(and (equal? head-type 'p-open)
+           (equal? tail-type 'p-close))
+      (formula-expr body)]
+     [else (error 'atom-expr
+                  "expected (<Formula>), but first token was '~a' and last was '~a'"
+                  head-type
+                  tail-type)])])
 
 ;; split list into three parts
 (: head-body-tail (All (T) (-> (Listof T) (List T (Listof T) T))))
-(define (head-body-tail li)
-  (match li
-    [(list) (error     'head-body-tail "length too short (0)")]
-    [(list _) (error   'head-body-tail "length too short (1)")]
-    [(list _ _) (error 'head-body-tail "length too short (2)")]
-    [(list head rest ...)
-     (match (body-tail rest)
-       [(list body tail)
-        (list head body tail)])]))
+(define/match (head-body-tail li)
+  [((list))     (error 'head-body-tail "length too short (0)")]
+  [((list _))   (error 'head-body-tail "length too short (1)")]
+  [((list _ _)) (error 'head-body-tail "length too short (2)")]
+  [((list head rest ...))
+   (match-define (list body tail)
+     (body-tail rest))
+   (list head body tail)])
 
 ;; length >= 2
+;; last will do..?
 (: body-tail (All (T) (-> (Listof T) (List (Listof T) T))))
-(define (body-tail li)
-  (match li
-    [(list head tail) (list (list head) tail)]
-    [(list head rest ...)
-     (define-values (body tail)
-       (apply values (body-tail rest)))
-     (list (cons head body) tail)]))
+(define/match (body-tail li)
+  [((list head tail)) (list (list head) tail)]
+  [((list head rest ...))
+   (match-define (list body tail)
+     (body-tail rest))
+   (list (cons head body) tail)])
 
 (: make-tree (-> (Listof token) node))
 (define (make-tree li)
@@ -306,20 +306,19 @@
        (check-exn exn:fail?
                   (lambda () (make-tree (tokenize "10x"))))))))
 
-;; easy string representation of a tree
+;; quick simple string representation of a tree
 (: tree-to-string (-> node String))
 (define (tree-to-string n)
-  (match n
-    [(node (token type str) children)
-     (case type
-       [(or and xor) (format "(~a) ~a (~a)"
-                             (tree-to-string (car children))
-                             str
-                             (tree-to-string (cadr children)))]
-       [(not) (format "~a (~a)"
-                      str
-                      (tree-to-string (car children)))]
-       [else (format "~a" str)])]))
+  (match-define (node (token type str) children) n)
+  (case type
+    [(or and xor) (format "(~a) ~a (~a)"
+                          (tree-to-string (car children))
+                          str
+                          (tree-to-string (cadr children)))]
+    [(not) (format "~a (~a)"
+                   str
+                   (tree-to-string (car children)))]
+    [else (format "~a" str)]))
 
 (module+ test
   (void (run-tests

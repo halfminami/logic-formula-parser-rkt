@@ -28,14 +28,14 @@
 ;; contains duplicates and empty lists
 (: leaf-variable-list (-> node (Listof (U String Null))))
 (define (leaf-variable-list n)
-  (define children (node-children n))
-  (case (token-type (node-token n))
+  (match-define (node (token type str) children) n)
+  (case type
     [(one zero) '(())]
-    [(variable) (list (token-str (node-token n)))]
+    [(variable) (list str)]
     [(not) (leaf-variable-list (car children))]
     [else
-     (define-values (left right)
-       (values (car children) (cadr children)))
+     (define left (car children))
+     (define right (cadr children))
      (append (leaf-variable-list left)
              (leaf-variable-list right))]))
 
@@ -74,14 +74,13 @@
 ;; unique sorted list preserving custom ordering at the beginning
 (: custom-order-list (-> (Listof String) (Listof String)
                          (Listof String)))
-(define (custom-order-list custom lst)
-  (match lst
-    [(list) custom]
-    [(list head tail ...)
-     (if (member head custom)
-         (custom-order-list custom tail)
-         (custom-order-list (append custom (list head))
-                            tail))]))
+(define/match (custom-order-list custom lst)
+  [(custom (list)) custom]
+  [(custom (list head tail ...))
+   (if (member head custom)             ; skip if present
+       (custom-order-list custom tail)
+       (custom-order-list (append custom (list head))
+                          tail))])
 
 (module+ test
   (define custom-order-list-tests
@@ -101,30 +100,32 @@
 ;; - - - - - - - - - - - - - -
 ;; map variable names to bit
 ;; - - - - - - - - - - - - - -
+;; with bit manipulation
+;; we will build a truth table with a kind of bitwise exhaustive search
 
-;; string at index 0 is mapped to the most significant bit
-(: make-bit-mapping-reversed (-> (Listof String) Exact-Nonnegative-Integer
-                                 (Immutable-HashTable String Boolean)))
-(define (make-bit-mapping-reversed reversed bit)
-  (: mapping (-> (Listof String) Exact-Nonnegative-Integer
-                 (U (Listof (Pairof String Boolean)) Null)))
-  (define (mapping lst i)
-    (match lst
-      [(list) '()]
-      [(list head tail ...)
-       (cons (cons head (bitwise-bit-set? bit i))
-             (mapping tail (add1 i)))]))
-  (make-immutable-hash (mapping reversed 0)))
+;; I wanted something like this:
+#;
+(define ((make-bit-mapping lst len) bit)
+  (define mapping
+    (for/list ([i (in-inclusive-range (sub1 len) 0 -1)]
+               [v lst])
+      (cons v (bitwise-bit-set? bit i))))
+  (make-immutable-hash mapping))
+;; but the type checker was not happy
 
-;; maps each variable to corresponding bit
-;; this curry reverses the list only once (is there a better way to do the same thing?)
-(: make-bit-mapping (-> (Listof String)
+(: make-bit-mapping (-> (Listof String) Exact-Nonnegative-Integer
                         (-> Exact-Nonnegative-Integer
                             (Immutable-HashTable String Boolean))))
-(define (make-bit-mapping lst)
-  (define reversed (reverse lst))
-  (lambda ([bit : Exact-Nonnegative-Integer])
-    (make-bit-mapping-reversed reversed bit)))
+(define ((make-bit-mapping lst len) bit)
+  (: mapping (-> (Listof String) Integer (Listof (Pairof String Boolean))))
+  (define/match (mapping lst i)
+    [((list) _) '()]
+    [(_ i) #:when (< i 0) '()]
+    [((list head tail ...) i)
+     (define this-pair (cons head (bitwise-bit-set? bit i)))
+     (cons this-pair
+           (mapping tail (sub1 i)))])
+  (make-immutable-hash (mapping lst (sub1 len))))
 
 (module+ test
   (define make-bit-mapping-tests
@@ -132,22 +133,22 @@
      "make-bit-mapping"
      (test-case
          "can create correct hashtable"
-       (define xyzz (make-bit-mapping (list "x" "y" "z" "z'")))
+       (define xyzz (make-bit-mapping (list "x" "y" "z" "w") 4))
        
        (check-equal? (xyzz #b0)
-                     (make-immutable-hash '(("x" . #f) ("y" . #f) ("z" . #f) ("z'" . #f))))
+                     (make-immutable-hash '(("x" . #f) ("y" . #f) ("z" . #f) ("w" . #f))))
        (check-equal? (xyzz #b1)
-                     (make-immutable-hash '(("x" . #f) ("y" . #f) ("z" . #f) ("z'" . #t))))
+                     (make-immutable-hash '(("x" . #f) ("y" . #f) ("z" . #f) ("w" . #t))))
        (check-equal? (xyzz #b100)
-                     (make-immutable-hash '(("x" . #f) ("y" . #t) ("z" . #f) ("z'" . #f))))
+                     (make-immutable-hash '(("x" . #f) ("y" . #t) ("z" . #f) ("w" . #f))))
        (check-equal? (xyzz #b1110)
-                     (make-immutable-hash '(("x" . #t) ("y" . #t) ("z" . #t) ("z'" . #f))))
+                     (make-immutable-hash '(("x" . #t) ("y" . #t) ("z" . #t) ("w" . #f))))
        (check-equal? (xyzz #b1000000)
-                     (make-immutable-hash '(("x" . #f) ("y" . #f) ("z" . #f) ("z'" . #f)))))
+                     (make-immutable-hash '(("x" . #f) ("y" . #f) ("z" . #f) ("w" . #f)))))
      
      (test-case
          "no variable"
-       (check-equal? ((make-bit-mapping '()) #b1)
+       (check-equal? ((make-bit-mapping '() 0) #b1)
                      (make-immutable-hash))))))
 
 ;; - - - - - - - - - - - - - - - - - - -
@@ -173,10 +174,8 @@
 (: evaluate (-> node (Immutable-HashTable String Boolean)
                 Boolean))
 (define (evaluate r hs)
-  (define-values (tkn chs)
-    (values (node-token r) (node-children r)))
-  (define-values (type str)
-    (values (token-type tkn) (token-str tkn)))
+  (match-define (node tkn chs) r)
+  (match-define (token type str) tkn)
   #;(printf "evaluate ~a\n" str)        ; see shortcircuit!
   (case type
     [(one) #t]
@@ -207,7 +206,7 @@
          "can evaluate + *"
        (define tree (make-tree (tokenize "x+y*z")))
        (define vlst (variable-list tree)) ; x y z
-       (define bmap (make-bit-mapping vlst))
+       (define bmap (make-bit-mapping vlst (length vlst)))
 
        (check-equal? (evaluate tree (bmap #b100))
                      #t)
@@ -220,7 +219,7 @@
          "can evaluate ^ * 1"
        (define tree (make-tree (tokenize "1^x^x*y")))
        (define vlst (variable-list tree)) ; x y
-       (define bmap (make-bit-mapping vlst))
+       (define bmap (make-bit-mapping vlst (length vlst)))
 
        (check-equal? (evaluate tree (bmap #b00))
                      #t)
@@ -235,7 +234,7 @@
          "can evaluate constant function"
        (define tree (make-tree (tokenize "0")))
        (define vlst (variable-list tree))
-       (define bmap (make-bit-mapping vlst))
+       (define bmap (make-bit-mapping vlst (length vlst)))
        
        (check-equal? (evaluate tree (bmap #b0))
                      #f)))))
